@@ -32,6 +32,17 @@ python3 -c "import tkinter; print('Tkinter is installed and ready.')"
 g++ --version
 ```
 
+## Build C++ DLL (Required)
+
+Before running the client, you must build the C++ socket library.
+
+### Windows
+```powershell
+cd python/cpp_socket
+.\build.bat
+```
+This will generate `socket_client.dll`.
+
 ## To Use
 
 To start the application, navigate to the python directory and run the client script:
