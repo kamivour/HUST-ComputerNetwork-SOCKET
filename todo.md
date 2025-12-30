@@ -1,0 +1,4 @@
+- C++ DLL cho server (server vẫn đang dùng Python)
+- Thêm log cụ thể msg được di chuyển qua các socket và đường truyền như thế nào
+- In đậm USER
+- Context như Hiệp gửi
