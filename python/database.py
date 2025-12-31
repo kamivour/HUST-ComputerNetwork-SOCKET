@@ -42,7 +42,7 @@ class Database:
             db_path: Path to SQLite database file
         """
         self.db_path = db_path
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # Reentrant lock to allow nested calls
         self._initialize()
 
     def _get_connection(self) -> sqlite3.Connection:

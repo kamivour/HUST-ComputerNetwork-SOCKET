@@ -5,27 +5,16 @@ chat_server.py - TCP Chat Server with Tkinter GUI
 import socket
 import threading
 import json
-import hashlib
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
-from typing import Dict, Optional, Set
+from typing import Dict
 from dataclasses import dataclass, field
 from protocol import (
     Message, MessageType, MessageBuffer, serialize,
     create_global_message, create_private_message
 )
-
-
-@dataclass
-class User:
-    """User account data"""
-    username: str
-    password_hash: str
-    display_name: str
-    role: int = 0  # 0 = member, 1 = admin
-    is_banned: bool = False
-    is_muted: bool = False
+from database import Database, User
 
 
 @dataclass
@@ -39,101 +28,6 @@ class ClientSession:
     active: bool = True
     buffer: MessageBuffer = field(default_factory=MessageBuffer)
     send_lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-class Database:
-    """Simple in-memory user database"""
-
-    def __init__(self):
-        self.users: Dict[str, User] = {}
-        self.lock = threading.Lock()
-        # Create default admin
-        self._create_default_admin()
-
-    def _create_default_admin(self):
-        self.register_user("admin", "admin", "Administrator")
-        with self.lock:
-            if "admin" in self.users:
-                self.users["admin"].role = 1
-
-    def _hash_password(self, password: str) -> str:
-        return hashlib.sha256((password + "chat_salt_2024").encode()).hexdigest()
-
-    def register_user(self, username: str, password: str, display_name: str = "") -> bool:
-        with self.lock:
-            if username in self.users:
-                return False
-            self.users[username] = User(
-                username=username,
-                password_hash=self._hash_password(password),
-                display_name=display_name or username
-            )
-            return True
-
-    def authenticate(self, username: str, password: str) -> bool:
-        with self.lock:
-            user = self.users.get(username)
-            if not user:
-                return False
-            return user.password_hash == self._hash_password(password)
-
-    def get_user(self, username: str) -> Optional[User]:
-        with self.lock:
-            return self.users.get(username)
-
-    def is_banned(self, username: str) -> bool:
-        user = self.get_user(username)
-        return user.is_banned if user else False
-
-    def is_muted(self, username: str) -> bool:
-        user = self.get_user(username)
-        return user.is_muted if user else False
-
-    def is_admin(self, username: str) -> bool:
-        user = self.get_user(username)
-        return user.role == 1 if user else False
-
-    def ban_user(self, username: str) -> bool:
-        with self.lock:
-            if username in self.users:
-                self.users[username].is_banned = True
-                return True
-            return False
-
-    def unban_user(self, username: str) -> bool:
-        with self.lock:
-            if username in self.users:
-                self.users[username].is_banned = False
-                return True
-            return False
-
-    def mute_user(self, username: str) -> bool:
-        with self.lock:
-            if username in self.users:
-                self.users[username].is_muted = True
-                return True
-            return False
-
-    def unmute_user(self, username: str) -> bool:
-        with self.lock:
-            if username in self.users:
-                self.users[username].is_muted = False
-                return True
-            return False
-
-    def promote_user(self, username: str) -> bool:
-        with self.lock:
-            if username in self.users:
-                self.users[username].role = 1
-                return True
-            return False
-
-    def demote_user(self, username: str) -> bool:
-        with self.lock:
-            if username in self.users:
-                self.users[username].role = 0
-                return True
-            return False
 
 
 class ChatServer:
