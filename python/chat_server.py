@@ -46,11 +46,23 @@ class ChatServer:
         self.users_lock = threading.Lock()
 
         self.log_callback = None
+        self.message_log_callback = None
 
     def set_log_callback(self, callback):
         self.log_callback = callback
         # Also set protocol socket log callback to send to GUI
         set_socket_log_callback(callback)
+    
+    def set_message_log_callback(self, callback):
+        """Set callback for message logs (chat messages only)"""
+        self.message_log_callback = callback
+    
+    def message_log(self, message: str):
+        """Log chat messages to message log"""
+        timestamp = datetime.now().strftime("[%H:%M:%S]")
+        log_msg = f"{timestamp} {message}"
+        if self.message_log_callback:
+            self.message_log_callback(log_msg)
 
     def log(self, message: str):
         timestamp = datetime.now().strftime("[%H:%M:%S]")
@@ -337,6 +349,7 @@ class ChatServer:
             return
 
         self.log(f"Global message from {session.username}: {content[:50]}...")
+        self.message_log(f"[GLOBAL] {session.username}: {content}")
 
         broadcast_msg = create_global_message(session.username, content)
         self._broadcast(broadcast_msg)
@@ -361,6 +374,7 @@ class ChatServer:
             return
 
         self.log(f"Private message from {session.username} to {receiver}")
+        self.message_log(f"[PRIVATE] {session.username} → {receiver}: {content}")
 
         private_msg = create_private_message(session.username, receiver, content)
 
@@ -581,12 +595,30 @@ class ServerWindow:
 
         ttk.Button(clients_frame, text="Refresh", command=self._refresh_clients).pack(side=tk.BOTTOM, pady=5)
 
-        # Log frame
-        log_frame = ttk.LabelFrame(paned, text="Server Log", padding=5)
-        paned.add(log_frame, weight=1)
-
-        self.log_text = tk.Text(log_frame, state=tk.DISABLED, height=10, wrap=tk.WORD)
-        log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        # Logs frame with tabs
+        logs_frame = ttk.LabelFrame(paned, text="Logs", padding=5)
+        paned.add(logs_frame, weight=1)
+        
+        # Create notebook for log tabs
+        self.log_notebook = ttk.Notebook(logs_frame)
+        self.log_notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Message Log tab (first)
+        message_log_frame = ttk.Frame(self.log_notebook)
+        self.log_notebook.add(message_log_frame, text="Message Log")
+        
+        self.message_log_text = tk.Text(message_log_frame, state=tk.DISABLED, height=10, wrap=tk.WORD)
+        message_log_scroll = ttk.Scrollbar(message_log_frame, command=self.message_log_text.yview)
+        self.message_log_text.config(yscrollcommand=message_log_scroll.set)
+        message_log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.message_log_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Server Log tab (second)
+        server_log_frame = ttk.Frame(self.log_notebook)
+        self.log_notebook.add(server_log_frame, text="Server Log")
+        
+        self.log_text = tk.Text(server_log_frame, state=tk.DISABLED, height=10, wrap=tk.WORD)
+        log_scroll = ttk.Scrollbar(server_log_frame, command=self.log_text.yview)
         self.log_text.config(yscrollcommand=log_scroll.set)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.pack(fill=tk.BOTH, expand=True)
@@ -631,6 +663,7 @@ class ServerWindow:
 
         self.server = ChatServer(port)
         self.server.set_log_callback(self._log)
+        self.server.set_message_log_callback(self._message_log)
 
         if self.server.start():
             self.status_label.config(text="Status: Running", foreground="green")
@@ -782,6 +815,15 @@ class ServerWindow:
             self.log_text.insert(tk.END, message + "\n")
             self.log_text.config(state=tk.DISABLED)
             self.log_text.see(tk.END)
+        self.root.after(0, update)
+    
+    def _message_log(self, message: str):
+        """Log chat messages to Message Log tab"""
+        def update():
+            self.message_log_text.config(state=tk.NORMAL)
+            self.message_log_text.insert(tk.END, message + "\n")
+            self.message_log_text.config(state=tk.DISABLED)
+            self.message_log_text.see(tk.END)
         self.root.after(0, update)
 
     def _on_close(self):
