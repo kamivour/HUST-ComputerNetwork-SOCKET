@@ -12,7 +12,7 @@ from typing import Dict
 from dataclasses import dataclass, field
 from protocol import (
     Message, MessageType, MessageBuffer, serialize,
-    create_global_message, create_private_message
+    create_global_message, create_private_message, set_socket_log_callback
 )
 from database import Database, User
 
@@ -49,6 +49,8 @@ class ChatServer:
 
     def set_log_callback(self, callback):
         self.log_callback = callback
+        # Also set protocol socket log callback to send to GUI
+        set_socket_log_callback(callback)
 
     def log(self, message: str):
         timestamp = datetime.now().strftime("[%H:%M:%S]")
@@ -127,7 +129,8 @@ class ChatServer:
                 data = session.socket.recv(4096)
                 if not data:
                     break
-
+                
+                self.log(f"[SOCKET-RECV] ← {session.address}: {len(data)} bytes")
                 session.buffer.append(data)
                 while session.buffer.has_complete_message():
                     msg = session.buffer.extract_message()
@@ -158,9 +161,11 @@ class ChatServer:
         try:
             with session.send_lock:
                 data = serialize(msg)
+                self.log(f"[SOCKET-SEND] → {session.address}: {len(data)} bytes")
                 session.socket.sendall(data)
             return True
-        except:
+        except Exception as e:
+            self.log(f"[SOCKET-ERROR] Failed to send to {session.address}: {e}")
             return False
 
     def _send_error(self, session: ClientSession, error: str):
@@ -480,6 +485,24 @@ class ChatServer:
                     "role": self.db.get_user(session.username).role if session.username and self.db.get_user(session.username) else 0
                 })
         return result
+    
+    def get_all_users_with_status(self) -> list:
+        """Get all users from database with their connection status"""
+        result = []
+        online_users = self.get_online_users()
+        
+        all_users = self.db.get_all_users()
+        for user in all_users:
+            status = "Connected" if user.username in online_users else "Offline"
+            result.append({
+                "username": user.username,
+                "display_name": user.display_name,
+                "role": user.role,
+                "status": status,
+                "is_banned": user.is_banned,
+                "is_muted": user.is_muted
+            })
+        return result
 
     def broadcast_server_message(self, content: str):
         msg = create_global_message("[SERVER]", content)
@@ -488,7 +511,12 @@ class ChatServer:
 
     def send_to_user_from_server(self, username: str, content: str) -> bool:
         msg = create_private_message("[SERVER]", username, content)
-        return self._send_to_user(username, msg)
+        result = self._send_to_user(username, msg)
+        if result:
+            self.log(f"Sent private message to {username}: {content}")
+        else:
+            self.log(f"Failed to send private message to {username} (not connected)")
+        return result
 
 
 class ServerWindow:
@@ -501,6 +529,7 @@ class ServerWindow:
 
         self.server = None
         self.refresh_timer = None
+        self.selected_username = None  # Track selected client
 
         self._setup_ui()
 
@@ -525,20 +554,28 @@ class ServerWindow:
         paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
         # Clients frame
-        clients_frame = ttk.LabelFrame(paned, text="Connected Clients", padding=5)
+        clients_frame = ttk.LabelFrame(paned, text="Clients", padding=5)
         paned.add(clients_frame, weight=1)
 
         # Client table
-        columns = ("Username", "Display Name", "IP Address", "Role")
+        columns = ("Username", "Display Name", "Role", "Status")
         self.client_tree = ttk.Treeview(clients_frame, columns=columns, show="headings", height=8)
-        for col in columns:
-            self.client_tree.heading(col, text=col)
-            self.client_tree.column(col, width=150)
+        self.client_tree.heading("Username", text="Username")
+        self.client_tree.heading("Display Name", text="Display Name")
+        self.client_tree.heading("Role", text="Role")
+        self.client_tree.heading("Status", text="Status")
+        self.client_tree.column("Username", width=150)
+        self.client_tree.column("Display Name", width=150)
+        self.client_tree.column("Role", width=100)
+        self.client_tree.column("Status", width=100)
 
         scrollbar = ttk.Scrollbar(clients_frame, orient=tk.VERTICAL, command=self.client_tree.yview)
         self.client_tree.configure(yscrollcommand=scrollbar.set)
         self.client_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Configure tags for status styling
+        self.client_tree.tag_configure('connected', foreground='green')
 
         self.client_tree.bind('<<TreeviewSelect>>', self._on_client_select)
 
@@ -629,37 +666,79 @@ class ServerWindow:
         if not self.server:
             return
 
+        # Temporarily unbind selection event to prevent triggering during refresh
+        self.client_tree.unbind('<<TreeviewSelect>>')
+        
         # Clear tree
         for item in self.client_tree.get_children():
             self.client_tree.delete(item)
 
-        # Add clients
-        clients = self.server.get_connected_clients()
-        for client in clients:
-            role = "Admin" if client["role"] == 1 else "Member"
-            if not client["authenticated"]:
-                role = "-"
-            self.client_tree.insert("", tk.END, values=(
-                client["username"],
-                client["display_name"],
-                client["address"],
-                role
-            ))
+        # Add all users from database
+        users = self.server.get_all_users_with_status()
+        selected_item = None
+        
+        for user in users:
+            role = "Admin" if user["role"] == 1 else "Member"
+            
+            # Add tag for styling based on status
+            tags = ()
+            if user["status"] == "Connected":
+                tags = ('connected',)
+            
+            item_id = self.client_tree.insert("", tk.END, values=(
+                user["username"],
+                user["display_name"],
+                role,
+                user["status"]
+            ), tags=tags)
+            
+            # Track item to restore selection
+            if self.selected_username == user["username"]:
+                selected_item = item_id
+        
+        # Restore selection if user was previously selected
+        if selected_item:
+            self.client_tree.selection_set(selected_item)
+            self.client_tree.see(selected_item)
+            # Manually update UI state (since event is unbound)
+            item = self.client_tree.item(selected_item)
+            status = item["values"][3]
+            self.selected_label.config(text=f"Selected: {self.selected_username}")
+            if status == "Connected" and self.server and self.server.running:
+                self.private_entry.config(state=tk.NORMAL)
+                self.private_button.config(state=tk.NORMAL)
+            else:
+                self.private_entry.config(state=tk.DISABLED)
+                self.private_button.config(state=tk.DISABLED)
+                if status == "Offline":
+                    self.selected_label.config(text=f"Selected: {self.selected_username} (Offline)")
+        
+        # Re-bind selection event
+        self.client_tree.bind('<<TreeviewSelect>>', self._on_client_select)
 
     def _on_client_select(self, event):
         selection = self.client_tree.selection()
         if selection:
             item = self.client_tree.item(selection[0])
             username = item["values"][0]
+            status = item["values"][3]  # Status column
+            
+            # Save selected username
+            self.selected_username = username
+            
             self.selected_label.config(text=f"Selected: {username}")
 
-            if username != "(not logged in)" and self.server and self.server.running:
+            # Only enable private message for Connected users
+            if status == "Connected" and self.server and self.server.running:
                 self.private_entry.config(state=tk.NORMAL)
                 self.private_button.config(state=tk.NORMAL)
             else:
                 self.private_entry.config(state=tk.DISABLED)
                 self.private_button.config(state=tk.DISABLED)
+                if status == "Offline":
+                    self.selected_label.config(text=f"Selected: {username} (Offline)")
         else:
+            self.selected_username = None
             self.selected_label.config(text="Selected: (none)")
             self.private_entry.config(state=tk.DISABLED)
             self.private_button.config(state=tk.DISABLED)
@@ -678,13 +757,24 @@ class ServerWindow:
         selection = self.client_tree.selection()
         if not selection:
             return
+        
         item = self.client_tree.item(selection[0])
         username = item["values"][0]
+        status = item["values"][3]
+        
         content = self.private_entry.get().strip()
-        if content and username != "(not logged in)":
-            self.server.send_to_user_from_server(username, content)
-            self._log(f"[PRIVATE -> {username}] Server: {content}")
+        if not content:
+            return
+            
+        if status != "Connected":
+            messagebox.showwarning("Cannot Send", f"{username} is not connected")
+            return
+        
+        if self.server.send_to_user_from_server(username, content):
+            self._log(f"[PRIVATE → {username}] Server: {content}")
             self.private_entry.delete(0, tk.END)
+        else:
+            messagebox.showerror("Send Failed", f"Failed to send message to {username}")
 
     def _log(self, message: str):
         def update():

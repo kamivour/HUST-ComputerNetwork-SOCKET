@@ -137,9 +137,11 @@ class ChatClient:
             return
 
         try:
+            from protocol import socket_log
             if USE_CPP_SOCKET and self.cpp_socket:
                 # Use C++ DLL - send as JSON dict
                 msg_dict = serialize_to_dict(msg)
+                socket_log("[SOCKET]", f"Sending via C++ DLL: {msg.type.name}")
                 if not self.cpp_socket.send_message(msg_dict):
                     error = self.cpp_socket.get_error()
                     self._trigger_callback('error', f"Send failed: {error}")
@@ -148,8 +150,12 @@ class ChatClient:
                 # Fallback to Python socket
                 from protocol import serialize
                 data = serialize(msg)
+                socket_log("[SOCKET-SEND]", f"Sending {len(data)} bytes")
                 self.py_socket.sendall(data)
+                socket_log("[SOCKET]", "Successfully sent")
         except Exception as e:
+            from protocol import socket_log
+            socket_log("[SOCKET]", f"ERROR: {e}")
             self._trigger_callback('error', str(e))
             self.disconnect()
 
@@ -192,12 +198,14 @@ class ChatClient:
 
     def _receive_loop_python(self):
         """Receive loop using Python socket (fallback)"""
-        from protocol import serialize
+        from protocol import serialize, socket_log
         while self.running and self.connected:
             try:
                 data = self.py_socket.recv(4096)
                 if not data:
                     break
+                    
+                socket_log("[SOCKET-RECV]", f"Received {len(data)} bytes")
                 self.buffer.append(data)
 
                 while self.buffer.has_complete_message():
@@ -206,6 +214,7 @@ class ChatClient:
                         self._handle_message(msg)
             except Exception as e:
                 if self.running:
+                    socket_log("[SOCKET]", f"ERROR: {e}")
                     self._trigger_callback('error', str(e))
                 break
 
@@ -381,6 +390,11 @@ class ChatWindow:
         self.global_chat.config(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.global_chat.pack(fill=tk.BOTH, expand=True)
+        
+        # Configure text tags for formatting
+        self.global_chat.tag_config('timestamp', foreground='gray')
+        self.global_chat.tag_config('username', foreground='#0066CC', font=('TkDefaultFont', 9, 'bold'))
+        self.global_chat.tag_config('server', foreground='#CC0000', font=('TkDefaultFont', 9, 'bold'))
 
         # Message input
         input_frame = ttk.Frame(left_frame)
@@ -398,9 +412,23 @@ class ChatWindow:
         right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
         right_frame.pack_propagate(False)
 
+        # Instruction label
+        instruction_label = ttk.Label(right_frame, text="Double-click to chat privately", 
+                                      font=('', 8), foreground='gray')
+        instruction_label.pack(pady=(5, 0))
+
         self.users_listbox = tk.Listbox(right_frame)
         self.users_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.users_listbox.bind('<Double-1>', self._on_user_double_click)
+        
+        # Private chat button
+        self.private_chat_button = ttk.Button(right_frame, text="Private Chat", 
+                                             command=self._open_private_chat_from_selection,
+                                             state=tk.DISABLED)
+        self.private_chat_button.pack(fill=tk.X, padx=5, pady=(0, 5))
+        
+        # Bind selection event to enable/disable button
+        self.users_listbox.bind('<<ListboxSelect>>', self._on_user_select)
 
         # Status bar
         self.status_var = tk.StringVar(value="Disconnected")
@@ -493,11 +521,38 @@ class ChatWindow:
         else:
             # Private chat
             tab_text = self.chat_notebook.tab(current_tab, "text")
+            
+            # Don't allow sending to [SERVER] tab
+            if tab_text == "[SERVER]":
+                messagebox.showinfo("Info", "Cannot send messages to server. Use Global Chat to broadcast.")
+                return
+            
             self.client.send_private_message(tab_text, content)
 
         self.message_entry.delete(0, tk.END)
 
     def _on_user_double_click(self, event):
+        selection = self.users_listbox.curselection()
+        if selection:
+            username = self.users_listbox.get(selection[0])
+            if username != self.client.username:
+                self._open_private_chat(username)
+    
+    def _on_user_select(self, event):
+        """Enable/disable Private Chat button based on selection"""
+        selection = self.users_listbox.curselection()
+        if selection:
+            username = self.users_listbox.get(selection[0])
+            # Enable button only if selected user is not self
+            if username != self.client.username:
+                self.private_chat_button.config(state=tk.NORMAL)
+            else:
+                self.private_chat_button.config(state=tk.DISABLED)
+        else:
+            self.private_chat_button.config(state=tk.DISABLED)
+    
+    def _open_private_chat_from_selection(self):
+        """Open private chat with selected user from button click"""
         selection = self.users_listbox.curselection()
         if selection:
             username = self.users_listbox.get(selection[0])
@@ -520,15 +575,42 @@ class ChatWindow:
         scrollbar = ttk.Scrollbar(frame, command=chat_text.yview)
         chat_text.config(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        chat_text.pack(fill=tk.BOTH, expand=True)
-
+        chat_text.pack(fill=tk.BOTH, expand=True)        
+        # Configure text tags for formatting
+        chat_text.tag_config('timestamp', foreground='gray')
+        chat_text.tag_config('username', foreground='#0066CC', font=('TkDefaultFont', 9, 'bold'))
+        chat_text.tag_config('server', foreground='#CC0000', font=('TkDefaultFont', 9, 'bold'))
         self.private_chats[username] = chat_text
         self.chat_notebook.select(self.chat_notebook.index("end") - 1)
 
-    def _append_to_chat(self, text_widget, message: str, tag: str = None):
+    def _append_to_chat(self, text_widget, message: str = None, timestamp: str = None, username: str = None, content: str = None, is_server: bool = False):
+        """Append formatted message to chat widget"""
         def update():
             text_widget.config(state=tk.NORMAL)
-            text_widget.insert(tk.END, message + "\n")
+            
+            # If simple message string provided (legacy support)
+            if message is not None:
+                text_widget.insert(tk.END, message + "\n")
+            else:
+                # Formatted message with tags
+                # Insert timestamp with gray color
+                if timestamp:
+                    text_widget.insert(tk.END, f"[{timestamp}] ", 'timestamp')
+                
+                # Insert username with blue color and bold
+                if username:
+                    if is_server:
+                        text_widget.insert(tk.END, username, 'server')
+                    else:
+                        text_widget.insert(tk.END, username, 'username')
+                    text_widget.insert(tk.END, ": ")
+                
+                # Insert message content (normal text)
+                if content:
+                    text_widget.insert(tk.END, content)
+                
+                text_widget.insert(tk.END, "\n")
+            
             text_widget.config(state=tk.DISABLED)
             text_widget.see(tk.END)
         self.root.after(0, update)
@@ -564,10 +646,17 @@ class ChatWindow:
 
     def _on_global_message(self, sender: str, content: str, timestamp: str):
         time_str = timestamp if timestamp else datetime.now().strftime("%H:%M:%S")
-        message = f"[{time_str}] {sender}: {content}"
-        self._append_to_chat(self.global_chat, message)
+        self._append_to_chat(self.global_chat, timestamp=time_str, username=sender, content=content)
 
     def _on_private_message(self, sender: str, receiver: str, content: str, timestamp: str):
+        time_str = timestamp if timestamp else datetime.now().strftime("%H:%M:%S")
+        
+        # Check if message is from server
+        if sender == "[SERVER]":
+            # Show server messages in Global Chat with special formatting
+            self._append_to_chat(self.global_chat, timestamp=time_str, username="[SERVER → You]", content=content, is_server=True)
+            return
+        
         # Determine chat partner
         partner = sender if sender != self.client.username else receiver
 
@@ -575,9 +664,7 @@ class ChatWindow:
         if partner not in self.private_chats:
             self._open_private_chat(partner)
 
-        time_str = timestamp if timestamp else datetime.now().strftime("%H:%M:%S")
-        message = f"[{time_str}] {sender}: {content}"
-        self._append_to_chat(self.private_chats[partner], message)
+        self._append_to_chat(self.private_chats[partner], timestamp=time_str, username=sender, content=content)
 
     def _on_online_list(self, users: list):
         def update():

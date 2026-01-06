@@ -11,6 +11,27 @@ from typing import Optional
 from datetime import datetime
 
 
+# Global socket log callback
+_socket_log_callback = None
+
+def set_socket_log_callback(callback):
+    """Set the callback for socket logs (for GUI integration)"""
+    global _socket_log_callback
+    _socket_log_callback = callback
+
+def socket_log(tag: str, message: str, color_code: str = ""):
+    """Log detailed socket operation with timestamp"""
+    timestamp = datetime.now().strftime("[%H:%M:%S.%f")[:-3] + "]"
+    log_msg = f"{timestamp} {tag} {message}"
+    
+    # Print to console (for terminal mode)
+    print(log_msg)
+    
+    # Also send to GUI callback if set
+    if _socket_log_callback:
+        _socket_log_callback(log_msg)
+
+
 class MessageType(IntEnum):
     """Message types matching C++ Protocol.h"""
     REGISTER = 1
@@ -83,18 +104,31 @@ class Message:
 
 def serialize(msg: Message) -> bytes:
     """Serialize message to bytes with 4-byte length prefix (big-endian)"""
-    payload = json.dumps(msg.to_dict()).encode('utf-8')
+    json_str = json.dumps(msg.to_dict())
+    payload = json_str.encode('utf-8')
     length = len(payload)
     header = struct.pack('>I', length)  # Big-endian unsigned int
-    return header + payload
+    full_msg = header + payload
+    
+    # Detailed logs to terminal/GUI
+    socket_log("[SERIALIZE]", f"{MessageType(msg.type).name}: {len(full_msg)} bytes (4 header + {length} payload)")
+    socket_log("[JSON]", f"{json_str}")
+    
+    return full_msg
 
 
 def deserialize(data: bytes) -> Optional[Message]:
     """Deserialize bytes to Message"""
     try:
-        payload = json.loads(data.decode('utf-8'))
-        return Message.from_dict(payload)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        json_str = data.decode('utf-8')
+        payload = json.loads(json_str)
+        msg = Message.from_dict(payload)
+        
+        socket_log("[DESERIALIZE]", f"{MessageType(msg.type).name}: {len(data)} bytes")
+        socket_log("[JSON]", f"{json_str}")
+        return msg
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        socket_log("[DESERIALIZE-ERROR]", f"{e}")
         return None
 
 
@@ -119,6 +153,7 @@ class MessageBuffer:
 
     def append(self, data: bytes):
         self.buffer += data
+        socket_log("[BUFFER]", f"Appended {len(data)} bytes, total: {len(self.buffer)} bytes")
 
     def has_complete_message(self) -> bool:
         if len(self.buffer) < 4:
@@ -133,7 +168,8 @@ class MessageBuffer:
         length = struct.unpack('>I', self.buffer[:4])[0]
         payload = self.buffer[4:4+length]
         self.buffer = self.buffer[4+length:]
-
+        
+        socket_log("[BUFFER]", f"Extracted {4+length} bytes, remaining: {len(self.buffer)} bytes")
         return deserialize(payload)
 
     def clear(self):

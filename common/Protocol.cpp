@@ -40,6 +40,16 @@ std::vector<uint8_t> serialize(const Message& msg) {
     // Write payload
     std::memcpy(result.data() + 4, payload.data(), length);
 
+    // Debug log (can be enabled for detailed protocol analysis)
+    #ifdef PROTOCOL_DEBUG_LOG
+    std::cout << "[PROTOCOL] Serialize: Type=" << messageTypeToString(msg.type) 
+              << ", Length=" << length << " bytes" << std::endl;
+    std::cout << "[PROTOCOL] JSON Payload: " << payload << std::endl;
+    std::cout << "[PROTOCOL] Header bytes: [" 
+              << std::hex << (int)result[0] << " " << (int)result[1] << " " 
+              << (int)result[2] << " " << (int)result[3] << "]" << std::dec << std::endl;
+    #endif
+
     return result;
 }
 
@@ -48,6 +58,12 @@ Message deserialize(const uint8_t* data, size_t length) {
 
     try {
         std::string payload(reinterpret_cast<const char*>(data), length);
+        
+        #ifdef PROTOCOL_DEBUG_LOG
+        std::cout << "[PROTOCOL] Deserialize: Length=" << length << " bytes" << std::endl;
+        std::cout << "[PROTOCOL] JSON Payload: " << payload << std::endl;
+        #endif
+        
         json j = json::parse(payload);
 
         msg.type = static_cast<MessageType>(j["type"].get<int>());
@@ -56,9 +72,17 @@ Message deserialize(const uint8_t* data, size_t length) {
         msg.content = j.value("content", "");
         msg.timestamp = j.value("timestamp", "");
         msg.extra = j.value("extra", "");
+        
+        #ifdef PROTOCOL_DEBUG_LOG
+        std::cout << "[PROTOCOL] Parsed: Type=" << messageTypeToString(msg.type) << std::endl;
+        #endif
     } catch (const std::exception& e) {
         msg.type = MessageType::ERROR;
         msg.content = std::string("Parse error: ") + e.what();
+        
+        #ifdef PROTOCOL_DEBUG_LOG
+        std::cerr << "[PROTOCOL] Parse error: " << e.what() << std::endl;
+        #endif
     }
 
     return msg;
